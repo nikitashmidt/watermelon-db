@@ -1,11 +1,40 @@
 #include "Sqlite.h"
 #include "DatabasePlatform.h"
 #include <cassert>
+#include <fstream>
+#include <cstdio>
+#include <cstring>
 
 namespace watermelondb {
 
 using platform::consoleError;
 using platform::consoleLog;
+
+static constexpr char SQLITE_HEADER[16] = {
+    'S','Q','L','i','t','e',' ','f','o','r','m','a','t',' ','3','\0'
+};
+static constexpr size_t SQLITE_HEADER_SIZE = 16;
+
+static bool isPlaintextSqlite(const std::string &path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.good()) {
+        return false;  // File doesn't exist or can't be opened
+    }
+    char header[SQLITE_HEADER_SIZE];
+    file.read(header, SQLITE_HEADER_SIZE);
+    if (file.gcount() < static_cast<std::streamsize>(SQLITE_HEADER_SIZE)) {
+        return false;
+    }
+    return std::memcmp(header, SQLITE_HEADER, SQLITE_HEADER_SIZE) == 0;
+}
+
+static void wipeDbFiles(const std::string &path) {
+    consoleLog("Wiping plaintext database files at: " + path);
+    std::remove(path.c_str());
+    std::remove((path + "-wal").c_str());
+    std::remove((path + "-shm").c_str());
+    consoleLog("Plaintext database files wiped");
+}
 
 std::string resolveDatabasePath(std::string path) {
     if (path == "" || path == ":memory:" || path.rfind("file:", 0) == 0 || path.rfind("/", 0) == 0) {
@@ -17,14 +46,24 @@ std::string resolveDatabasePath(std::string path) {
     }
 }
 
-SqliteDb::SqliteDb(std::string path) {
+SqliteDb::SqliteDb(std::string path, const char *password) {
     consoleLog("Will open database...");
     platform::initializeSqlite();
-    #ifndef ANDROID
+#ifndef ANDROID
     assert(sqlite3_threadsafe());
-    #endif
+#endif
 
     auto resolvedPath = resolveDatabasePath(path);
+
+#ifdef SQLITE_HAS_CODEC
+    const bool encryptionEnabled = (password != nullptr && std::strlen(password) > 0);
+
+    if (encryptionEnabled && isPlaintextSqlite(resolvedPath)) {
+        consoleLog("Detected plaintext SQLite DB while encryption is enabled. Wiping: " + resolvedPath);
+        wipeDbFiles(resolvedPath);
+    }
+#endif
+
     int openResult = sqlite3_open(resolvedPath.c_str(), &sqlite);
 
     if (openResult != SQLITE_OK) {
@@ -37,7 +76,20 @@ SqliteDb::SqliteDb(std::string path) {
         }
     }
     assert(sqlite != nullptr);
-
+#ifdef SQLITE_HAS_CODEC
+    if (password != nullptr && strlen(password) > 0) {
+        sqlite3_key(sqlite, password, (int)strlen(password));
+        int rc = sqlite3_exec(sqlite, "SELECT count(*) FROM sqlite_master;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            auto error = std::string(sqlite3_errmsg(sqlite));
+            consoleError("Failed to open encrypted database - " + error);
+            sqlite3_close(sqlite);
+            sqlite = nullptr;
+            throw std::runtime_error("Failed to open encrypted database - " + error);
+        }
+    }
+#endif
+    assert(sqlite != nullptr);
     consoleLog("Opened database at " + resolvedPath);
 }
 
