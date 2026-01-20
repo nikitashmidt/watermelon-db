@@ -1,7 +1,7 @@
 require "json"
 
 package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
-isEncryptedDB = $isEncryptedDB || false
+isEncryptedDB = true
 Pod::Spec.new do |s|
   s.name         = "WatermelonDB"
   s.version      = package["version"]
